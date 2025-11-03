@@ -1,0 +1,191 @@
+use role sysadmin;
+use warehouse transform_wh;
+
+CREATE OR REPLACE DYNAMIC TABLE YELP_DB.GOLD.DIM_BUSINESS
+TARGET_LAG = '1 HOUR'
+WAREHOUSE = transform_wh
+REFRESH_MODE = INCREMENTAL
+AS
+SELECT 
+    b.BUSINESS_ID,
+    b.BUSINESS_NAME,
+    b.ADDRESS,
+    b.CITY,
+    b.STATE,
+    b.POSTAL_CODE,
+    b.LATITUDE,
+    b.LONGITUDE,
+    GET(b.CATEGORIES, 0) AS PRIMARY_CATEGORY,
+    b.CATEGORIES AS ALL_CATEGORIES,
+    COALESCE(ARRAY_SIZE(b.CATEGORIES), 0) AS CATEGORY_COUNT,
+    (LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%restaurant%' OR 
+     LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%food%' OR
+     LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%dining%' OR
+     LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%cafe%' OR
+     LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%bar%'
+     )   AS IS_RESTAURANT,
+     (LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%shopping%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%retail%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%store%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%shop%'
+     )  AS IS_RETAIL,
+    (LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%service%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%repair%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%salon%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%spa%'
+     )  AS IS_SERVICE,
+     (LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%nightlife%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%bar%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%club%' OR
+      LOWER(ARRAY_TO_STRING(b.CATEGORIES, ' || ')) ILIKE '%lounge%'
+     )  AS IS_NIGHTLIFE,
+    b.STARS AS CURRENT_STARS,
+    CASE 
+        WHEN b.STARS >= 4.5 THEN 'Excellent (4.5-5.0)'
+        WHEN b.STARS >= 4.0 THEN 'Very Good (4.0-4.4)'
+        WHEN b.STARS >= 3.0 THEN 'Good (3.0-3.9)'
+        WHEN b.STARS >= 2.0 THEN 'Fair (2.0-2.9)'
+        WHEN b.STARS IS NOT NULL THEN 'Poor (1.0-1.9)'
+        ELSE 'No Rating'
+    END AS STAR_RATING_CATEGORY,
+    b.REVIEW_COUNT AS CURRENT_REVIEW_COUNT,
+    CASE 
+        WHEN b.REVIEW_COUNT >= 1000 THEN 'High (1000+)'
+        WHEN b.REVIEW_COUNT >= 100 THEN 'Medium (100-999)'
+        WHEN b.REVIEW_COUNT >= 10 THEN 'Low (10-99)'
+        ELSE 'Very Low (0-9)'
+    END AS REVIEW_VOLUME_TIER,
+    b.IS_OPEN,
+    b.ATTRIBUTES IS NOT NULL AS HAS_ATTRIBUTES,
+    b.HOURS IS NOT NULL AS HAS_HOURS
+FROM YELP_DB.SILVER.BUSINESS b;
+
+
+CREATE OR REPLACE DYNAMIC TABLE YELP_DB.GOLD.DIM_USER
+TARGET_LAG = '1 HOUR'
+WAREHOUSE = transform_wh
+AS
+SELECT 
+    u.USER_ID,
+    u.USER_NAME,
+    u.YELPING_SINCE,
+    DATEDIFF(day, u.YELPING_SINCE, CURRENT_DATE()) AS TENURE_DAYS,
+    DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) AS TENURE_YEARS,
+    CASE 
+        WHEN DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) >= 10 THEN 'Veteran (10+ years)'
+        WHEN DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) >= 5 THEN 'Experienced (5-9 years)'
+        WHEN DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) >= 2 THEN 'Regular (2-4 years)'
+        WHEN DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) >= 1 THEN 'Established (1-2 years)'
+        ELSE 'New (< 1 year)'
+    END AS TENURE_BUCKET,
+    u.REVIEW_COUNT AS TOTAL_REVIEWS,
+    u.AVERAGE_STARS AS AVERAGE_STARS_GIVEN,
+    u.FRIEND_COUNT,
+    u.FANS AS FAN_COUNT,
+    u.IS_ELITE,
+    COALESCE(ARRAY_SIZE(ELITE_YEARS), 0) AS ELITE_YEAR_COUNT,
+    u.TOTAL_COMPLIMENTS AS TOTAL_COMPLIMENTS_RECEIVED,
+    u.USEFUL_VOTES_SENT,
+    u.FUNNY_VOTES_SENT,
+    u.COOL_VOTES_SENT,
+    u.USEFUL_VOTES_SENT + u.FUNNY_VOTES_SENT + u.COOL_VOTES_SENT AS TOTAL_VOTES_SENT,
+    -- Influence Score: weighted combination of social metrics
+    ROUND((u.FANS * 0.4) + 
+          (u.TOTAL_COMPLIMENTS * 0.3) + 
+          (u.REVIEW_COUNT * 0.2) + 
+          (u.FRIEND_COUNT * 0.1), 2) AS USER_INFLUENCE_SCORE,
+    CASE 
+        WHEN (u.FANS * 0.4) + (u.TOTAL_COMPLIMENTS * 0.3) + 
+             (u.REVIEW_COUNT * 0.2) + (u.FRIEND_COUNT * 0.1) >= 500 THEN 'High Influence'
+        WHEN (u.FANS * 0.4) + (u.TOTAL_COMPLIMENTS * 0.3) + 
+             (u.REVIEW_COUNT * 0.2) + (u.FRIEND_COUNT * 0.1) >= 100 THEN 'Medium Influence'
+        ELSE 'Low Influence'
+    END AS USER_ENGAGEMENT_TIER,
+    CASE 
+        WHEN DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()) = 0 THEN 'New User'
+        WHEN u.REVIEW_COUNT / NULLIF(DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()), 0) >= 50 THEN 'Very Active (50+/year)'
+        WHEN u.REVIEW_COUNT / NULLIF(DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()), 0) >= 12 THEN 'Active (12-49/year)'
+        WHEN u.REVIEW_COUNT / NULLIF(DATEDIFF(year, u.YELPING_SINCE, CURRENT_DATE()), 0) >= 4 THEN 'Moderate (4-11/year)'
+        ELSE 'Occasional (< 4/year)'
+    END AS REVIEW_FREQUENCY_CATEGORY
+FROM YELP_DB.SILVER.USER u;
+
+CREATE OR REPLACE TABLE YELP_DB.GOLD.DIM_DATE
+AS
+WITH date_range AS (
+    SELECT 
+        DATEADD(day, SEQ4(), '2004-01-01'::DATE) AS date_value
+    FROM TABLE(GENERATOR(ROWCOUNT => 10000))
+    WHERE DATEADD(day, SEQ4(), '2004-01-01'::DATE) <= DATEADD(year, 1, CURRENT_DATE())
+)
+SELECT 
+    TO_NUMBER(TO_CHAR(date_value, 'YYYYMMDD')) AS DATE_KEY,
+    date_value AS DATE_VALUE,
+    YEAR(date_value) AS YEAR,
+    QUARTER(date_value) AS QUARTER,
+    MONTH(date_value) AS MONTH,
+    MONTHNAME(date_value) AS MONTH_NAME,
+    TO_CHAR(date_value, 'MON') AS MONTH_NAME_SHORT,
+    WEEKOFYEAR(date_value) AS WEEK_OF_YEAR,
+    DAY(date_value) AS DAY_OF_MONTH,
+    DAYOFWEEK(date_value) AS DAY_OF_WEEK,
+    DAYNAME(date_value) AS DAY_NAME,
+    TO_CHAR(date_value, 'DY') AS DAY_NAME_SHORT,
+    DAYOFWEEK(date_value) IN (0, 6) AS IS_WEEKEND,
+    DAYOFWEEK(date_value) NOT IN (0, 6) AS IS_WEEKDAY,
+    TO_CHAR(date_value, 'YYYY-MM') AS YEAR_MONTH,
+    YEAR(date_value) || '-Q' || QUARTER(date_value) AS YEAR_QUARTER,
+    DAYOFYEAR(date_value) AS DAY_OF_YEAR
+FROM date_range;
+
+
+CREATE OR REPLACE DYNAMIC TABLE YELP_DB.GOLD.FACT_REVIEW
+TARGET_LAG = DOWNSTREAM
+WAREHOUSE = TRANSFORM_WH
+REFRESH_MODE = INCREMENTAL
+AS
+SELECT 
+    r.REVIEW_ID,
+    r.USER_ID,
+    r.BUSINESS_ID,
+    TO_NUMBER(TO_CHAR(r.REVIEW_DATE, 'YYYYMMDD')) AS REVIEW_DATE_KEY,
+    r.REVIEW_DATE,
+    YEAR(r.REVIEW_DATE) AS REVIEW_YEAR,
+    QUARTER(r.REVIEW_DATE) AS REVIEW_QUARTER,
+    MONTH(r.REVIEW_DATE) AS REVIEW_MONTH,
+    TO_CHAR(r.REVIEW_DATE, 'YYYY-MM') AS REVIEW_YEAR_MONTH,
+    r.STARS,
+    CASE 
+        WHEN r.STARS = 5 THEN '5 Stars - Excellent'
+        WHEN r.STARS = 4 THEN '4 Stars - Good'
+        WHEN r.STARS = 3 THEN '3 Stars - Average'
+        WHEN r.STARS = 2 THEN '2 Stars - Poor'
+        WHEN r.STARS = 1 THEN '1 Star - Terrible'
+        ELSE 'No Rating'
+    END AS STAR_CATEGORY,
+    r.STARS >= 4 AS IS_POSITIVE,
+    r.STARS <= 2 AS IS_NEGATIVE,
+    r.STARS = 3 AS IS_NEUTRAL,
+    r.REVIEW_TEXT,
+    r.REVIEW_TEXT_LENGTH,
+    r.REVIEW_WORD_COUNT,
+    CASE 
+        WHEN r.REVIEW_WORD_COUNT >= 200 THEN 'Very Long (200+ words)'
+        WHEN r.REVIEW_WORD_COUNT >= 100 THEN 'Long (100-199 words)'
+        WHEN r.REVIEW_WORD_COUNT >= 50 THEN 'Medium (50-99 words)'
+        WHEN r.REVIEW_WORD_COUNT >= 20 THEN 'Short (20-49 words)'
+        ELSE 'Very Short (< 20 words)'
+    END AS REVIEW_LENGTH_CATEGORY,
+    r.USEFUL_VOTES,
+    r.FUNNY_VOTES,
+    r.COOL_VOTES,
+    r.TOTAL_VOTES,
+    r.HAS_ENGAGEMENT,
+    ROUND((r.USEFUL_VOTES * 1.0) + (r.FUNNY_VOTES * 0.5) + (r.COOL_VOTES * 0.5), 2) AS ENGAGEMENT_SCORE,
+    CASE 
+        WHEN (r.USEFUL_VOTES * 1.0) + (r.FUNNY_VOTES * 0.5) + (r.COOL_VOTES * 0.5) >= 20 THEN 'High Engagement'
+        WHEN (r.USEFUL_VOTES * 1.0) + (r.FUNNY_VOTES * 0.5) + (r.COOL_VOTES * 0.5) >= 5 THEN 'Medium Engagement'
+        WHEN (r.USEFUL_VOTES * 1.0) + (r.FUNNY_VOTES * 0.5) + (r.COOL_VOTES * 0.5) > 0 THEN 'Low Engagement'
+        ELSE 'No Engagement'
+    END AS ENGAGEMENT_TIER
+FROM YELP_DB.SILVER.REVIEW r;
